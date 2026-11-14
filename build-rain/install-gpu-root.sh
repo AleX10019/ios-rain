@@ -37,13 +37,26 @@ if [ ! -e "$L/real/backboardd" ]; then
 fi
 install -m 755 -o 0 -g 0 "$G/backboardd" "$L/backboardd"
 install -d -m 755 -o 0 -g 0 "$mnt/topaz" "$mnt/topaz/lib"
-install -m 755 -o 0 -g 0 "$G"/*.dylib "$mnt/topaz/lib/"
+install -m 755 -o 0 -g 0 $(ls "$G"/*.dylib | grep -v libredwoodair) "$mnt/topaz/lib/"
 install -d -m 755 -o 0 -g 0 "$mnt/topaz/bin"
 install -m 755 -o 0 -g 0 "$G/hfs-grow" "$mnt/topaz/bin/hfs-grow"
 A="$mnt/System/Library/Audio/Plug-Ins/HAL/RedwoodAudio.driver"
 install -d -m 755 -o 0 -g 0 "$A"
 install -m 755 -o 0 -g 0 "$G/RedwoodAudio" "$A/RedwoodAudio"
 install -m 644 -o 0 -g 0 "$G/RedwoodAudio.Info.plist" "$A/Info.plist"
+# Metal (userland/metal, HakiOS): the sources load /redwood/lib/..., so that is where it goes; Metal's
+# discovery opens /System/Library/Extensions/<MetalPluginName>.bundle, a link to it. Inert unless
+# the kernel boots with metal=1 (see userland/metal/metal_boot.c). Skipped for an older artifact.
+if [ -s "$G/RedwoodMetal" ]; then
+	R="$mnt/redwood"
+	install -d -m 755 -o 0 -g 0 "$R" "$R/lib" "$R/bin" "$R/lib/RedwoodMetal.bundle"
+	install -m 755 -o 0 -g 0 "$G/RedwoodMetal" "$R/lib/RedwoodMetal.bundle/RedwoodMetal"
+	install -m 644 -o 0 -g 0 "$G/RedwoodMetal.Info.plist" "$R/lib/RedwoodMetal.bundle/Info.plist"
+	install -m 755 -o 0 -g 0 "$G/libredwoodair.dylib" "$R/lib/"
+	install -m 755 -o 0 -g 0 "$G/metal_props" "$G/metal_drv_test" "$G/metal_boot" "$R/bin/"
+	ln -sfn /redwood/lib/RedwoodMetal.bundle "$mnt/System/Library/Extensions/RedwoodMetal.bundle"
+	ls -la "$R/lib" "$R/bin"
+fi
 F="$mnt/usr/share/firmware/topaz"
 install -d -m 755 -o 0 -g 0 "$F"
 install -m 644 -o 0 -g 0 "$FW"/a610_zap.mdt "$FW"/a610_zap.b02 "$FW"/a630_sqe.fw "$F/"

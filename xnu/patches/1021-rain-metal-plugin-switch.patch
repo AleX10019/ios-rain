@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sat, 14 Nov 2026 23:30:00 +0100
+Subject: [PATCH] rain-1021: metal=1 lets root set Metal's plug-in properties
+
+Metal finds a GPU through MetalPluginName/MetalPluginClassName on the
+IOAcceleratorES service (userland/metal, HakiOS RedwoodMetal). The
+service stays published without them, so nothing walks that road at
+boot; with boot-arg metal=1 its setProperties takes those two strings
+(an empty one removes the key), as HakiOS's MiniIOMobileFramebuffer
+does, for userland/metal/metal_props.c. Without metal=1: unsupported.
+---
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 4d8544c..dec86f4 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -320,9 +320,45 @@ sweet_bl_num(OSObject *o)
+  */
+ class IOAcceleratorES : public IOService {
+ 	OSDeclareDefaultStructors(IOAcceleratorES);
++
++public:
++	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
+ };
+ 
+ OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
++
++/*
++ * rain: Metal (HakiOS RedwoodMetal, userland/metal). MTLRegisterDevices() reads MetalPluginName and
++ * MetalPluginClassName off this service and opens /System/Library/Extensions/<name>.bundle. The
++ * service is published without them, so nothing walks that road at boot; with boot-arg metal=1 a
++ * root program (metal_props on) may put them here after boot, and an empty string takes one off
++ * (HakiOS's MiniIOMobileFramebuffer does the same). Without metal=1: unsupported, as before.
++ */
++IOReturn
++IOAcceleratorES::setProperties(OSObject *properties)
++{
++	uint32_t metal = 0;
++	OSDictionary *d = OSDynamicCast(OSDictionary, properties);
++	if (!PE_parse_boot_argn("metal", &metal, sizeof(metal)) || metal == 0 || d == NULL) {
++		return kIOReturnUnsupported;
++	}
++	static const char *const keys[] = { "MetalPluginName", "MetalPluginClassName" };
++	bool any = false;
++	for (unsigned i = 0; i < 2; i++) {
++		OSString *v = OSDynamicCast(OSString, d->getObject(keys[i]));
++		if (v == NULL) {
++			continue;
++		}
++		any = true;
++		if (v->getLength() == 0) {
++			removeProperty(keys[i]);
++		} else {
++			setProperty(keys[i], v);
++		}
++		IOLog("SWEET FB: IOAcceleratorES %s = \"%s\"\n", keys[i], v->getCStringNoCopy());
++	}
++	return any ? kIOReturnSuccess : kIOReturnUnsupported;
++}
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+ 
+ class IOMobileFramebufferUserClient : public IOUserClient {

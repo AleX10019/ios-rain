@@ -82,6 +82,13 @@ def launchd(root):
             'RunAtLoad': True, 'KeepAlive': False, 'LaunchOnlyOnce': True, 'UserName': 'root',
             'StandardOutPath': '/dev/console', 'StandardErrorPath': '/dev/console'}
         print('launchd.plist: org.rain.hfs-grow job installed')
+    # rain: the Metal test at boot (userland/metal/metal_boot.c); does nothing unless the kernel has metal=1
+    if os.path.exists(os.path.join(root, 'redwood/bin/metal_boot')):
+        jobs['/System/Library/LaunchDaemons/org.rain.metal-boot.plist'] = {
+            'Label': 'org.rain.metal-boot', 'ProgramArguments': ['/redwood/bin/metal_boot'],
+            'RunAtLoad': True, 'KeepAlive': False, 'LaunchOnlyOnce': True, 'UserName': 'root',
+            'StandardOutPath': '/dev/console', 'StandardErrorPath': '/dev/console'}
+        print('launchd.plist: org.rain.metal-boot job installed')
     save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
     print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} CommCenter jobs removed')
 

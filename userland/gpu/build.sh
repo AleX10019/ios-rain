@@ -35,10 +35,11 @@ $CC -bundle -framework Foundation -framework IOKit -framework Metal -lobjc -Wl,-
 cp "$MT/metal_plugin.plist" "$O/RedwoodMetal.Info.plist"
 $CC -framework Foundation -framework IOKit -framework Metal -lobjc -o "$O/metal_drv_test" "$MT/metal_drv_test.m"
 $CC -framework CoreFoundation -framework IOKit -o "$O/metal_props" "$MT/metal_props.c"
+$CC -o "$O/metal_boot" "$MT/metal_boot.c"
 cp "$M/libredwoodair.dylib" "$O/"
 cp "$M/libOSMesa.8.dylib" "$O/"
 # Ad-hoc signatures: the kernel's AMFI stand-in makes every *signed* binary on the root a platform
 # binary, and launchd panics when a system job execs one that is not ("unexpected exec of non-platform binary").
-codesign -f -s - "$O/backboardd" "$O/RedwoodAudio" "$O/hfs-grow" "$O/RedwoodMetal" "$O/metal_drv_test" "$O/metal_props" "$O"/*.dylib
+codesign -f -s - "$O/backboardd" "$O/RedwoodAudio" "$O/hfs-grow" "$O/RedwoodMetal" "$O/metal_drv_test" "$O/metal_props" "$O/metal_boot" "$O"/*.dylib
 rm -rf "$O/inc"
 ls -l "$O"

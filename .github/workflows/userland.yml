@@ -53,6 +53,7 @@ jobs:
             userland/out-gpu/RedwoodMetal.Info.plist
             userland/out-gpu/metal_drv_test
             userland/out-gpu/metal_props
+            userland/out-gpu/metal_boot
             userland/out-gpu/libredwoodair.dylib
             userland/out-gpu/eagl_gen.h
           if-no-files-found: error
