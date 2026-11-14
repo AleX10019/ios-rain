@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sat, 14 Nov 2026 23:55:00 +0100
+Subject: [PATCH] rain-1023: post APPLE80211_M_LINK_QUALITY (Wi-Fi bars)
+
+Noise and SNR (1019, 1022) did not fill the status bar's Wi-Fi bars:
+after joining, wifid reads CURRENT_NETWORK and never asks RSSI again,
+and the driver never posted a link-quality event. Post event 17 (rssi,
+tx rate, zero-padded) on link up and with CURRENT_NETWORK answers, at
+most every 5 s.
+---
+diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
+index 917744b..56c1d85 100644
+--- a/bsd/dev/redwood_apple80211.c
++++ b/bsd/dev/redwood_apple80211.c
+@@ -43,6 +43,7 @@
+ #include <sys/redwood_sta.h>
+ #include <sys/sockio.h>
+ #include <sys/systm.h>
++#include <sys/time.h>
+ 
+ #define SIOCSA80211             0x802869c8u     /* _IOW('i', 200, struct apple80211req) */
+ #define SIOCGA80211             0xc02869c9u     /* _IOWR('i', 201, struct apple80211req) */
+@@ -193,7 +194,10 @@ _Static_assert(sizeof(struct apple80211_scan_result) == 1164 && offsetof(struct
+ 
+ /* Apple80211's events (APPLE80211_M_...) */
+ enum { EVENT_POWER_CHANGED = 1, EVENT_SSID_CHANGED = 2, EVENT_BSSID_CHANGED = 3, EVENT_LINK_CHANGED = 4, EVENT_ASSOC_DONE = 9,
+-       EVENT_SCAN_DONE = 10 };
++       EVENT_SCAN_DONE = 10, EVENT_LINK_QUALITY = 17 };
++
++static void post(uint32_t code, const void *data, uint32_t length);
++static void post_link_quality(int32_t rssi);
+ 
+ #define NOISE_FLOOR             (-95)   /* dBm; the radio does not report one */
+ 
+@@ -449,6 +453,9 @@ get(struct apple80211req *request)
+ 	}
+ 	case 103:                               /* all of it, as a scan's result */
+ 		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give_network(request, &state->bss);
++		if (error == 0) {
++			post_link_quality(state->bss.rssi);
++		}
+ 		break;
+ 	case 2: {                               /* how it was joined: open system, then WPA2 with a passphrase */
+ 		struct {
+@@ -627,6 +634,31 @@ post(uint32_t code, const void *data, uint32_t length)
+ 	kev_post_msg(&message);
+ }
+ 
++/*
++ * rain: APPLE80211_M_LINK_QUALITY (17; the event names in the shared cache run in number order from
++ * POWER_CHANGED = 1). The status bar's bars come from it, not from RSSI/NOISE, which wifid asks once.
++ * Data as macOS documents it (rssi dBm, tx rate Mbit/s), zero-padded: iOS drops short event data.
++ * Sent on link up and with CURRENT_NETWORK answers (wifid asks about once a minute), at most every 5 s.
++ */
++static void
++post_link_quality(int32_t rssi)
++{
++	static struct timeval last;
++	struct timeval now;
++	struct {
++		int32_t rssi;
++		uint32_t tx_rate;
++		uint8_t unused[56];
++	} quality = { .rssi = rssi, .tx_rate = 72 };
++
++	microuptime(&now);
++	if (last.tv_sec != 0 && now.tv_sec - last.tv_sec < 5) {
++		return;
++	}
++	last = now;
++	post(EVENT_LINK_QUALITY, &quality, sizeof(quality));
++}
++
+ /* What the station side says has happened (bsd/dev/redwood_sta.c calls this, on its thread or the station's). */
+ void
+ redwood_apple80211_event(enum redwood_sta_event event, int status)
+@@ -669,6 +701,9 @@ redwood_apple80211_event(enum redwood_sta_event event, int status)
+ 		post(EVENT_SSID_CHANGED, NULL, 0);
+ 		post(EVENT_BSSID_CHANGED, NULL, 0);
+ 		post(EVENT_LINK_CHANGED, &link, sizeof(link));
++		if (status == 1) {
++			post_link_quality(link.rssi);
++		}
+ 		break;
+ 	}
+ 	}
