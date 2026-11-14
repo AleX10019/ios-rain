@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sat, 14 Nov 2026 22:40:00 +0100
+Subject: [PATCH] rain-1019: answer APPLE80211 NOISE (empty Wi-Fi bars)
+
+Joined, the status bar showed the Wi-Fi icon with no bars: wifid asks
+RSSI (answered) and NOISE (17, refused) and rates the link by signal
+over noise. NOISE now answers a fixed -95 dBm floor in the same shape
+as RSSI.
+---
+diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
+index e2674ee..bd6884e 100644
+--- a/bsd/dev/redwood_apple80211.c
++++ b/bsd/dev/redwood_apple80211.c
+@@ -433,6 +433,15 @@ get(struct apple80211req *request)
+ 		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
+ 		break;
+ 	}
++	case 17: {                              /* rain: the noise floor; the bars are signal over noise (empty without it) */
++		struct {
++			uint32_t version, radios, unit;
++			int32_t each[4], all, each_ext[4], all_ext;
++		} answer = { .version = 1, .radios = 1, .each = { -95 }, .all = -95, .each_ext = { -95 }, .all_ext = -95 };
++
++		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
++		break;
++	}
+ 	case 103:                               /* all of it, as a scan's result */
+ 		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give_network(request, &state->bss);
+ 		break;
