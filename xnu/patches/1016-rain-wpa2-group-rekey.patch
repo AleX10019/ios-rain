@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sat, 14 Nov 2026 21:45:00 +0100
+Subject: [PATCH] rain-1016: answer the WPA2 group key handshake
+
+F12: joined, then "the AP ended the link, reason 16" about four minutes
+later: group key handshake timeout. w_eapol_rx dropped every EAPOL frame
+once the station was up. In S_UP it now takes a group message 1 (key
+type group, ACK, MIC): replay counter and MIC checked, the new GTK
+unwrapped (shared w_gtk_unwrap with message 3), message 2 sent protected
+(MIC + secure), the key installed.
+---
+diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
+index e38c68f..ab9c8fa 100644
+--- a/iokit/Kernel/arm/TopazModem.cpp
++++ b/iokit/Kernel/arm/TopazModem.cpp
+@@ -5373,7 +5373,7 @@ w_tx_ether(const uint8_t *e, size_t len, bool clear)
+ static void w_join_end(int result);
+ 
+ static void
+-w_eapol_send(uint16_t info, const uint8_t *nonce, const uint8_t *data, uint16_t dlen)
++w_eapol_send(uint16_t info, const uint8_t *nonce, const uint8_t *data, uint16_t dlen, bool clear = true)
+ {
+ 	uint8_t e[14 + 4 + 95 + 64] = {}, *k = e + 14 + 4, mic[20];
+ 	memcpy(e, s_bssid, 6);
+@@ -5403,7 +5403,28 @@ w_eapol_send(uint16_t info, const uint8_t *nonce, const uint8_t *data, uint16_t
+ 	}
+ 	w_hmac_sha1(s_ptk, 16, e + 14, 4 + body, NULL, 0, NULL, 0, mic);
+ 	memcpy(k + 77, mic, 16);
+-	(void)w_tx_ether(e, 14 + 4 + body, true);
++	(void)w_tx_ether(e, 14 + 4 + body, clear);
++}
++
++/* the GTK KDE (00-0F-AC type 1) out of AES-unwrapped key data; false when there is none */
++static bool
++w_gtk_unwrap(const uint8_t *k, uint16_t info, uint16_t dlen, uint8_t gtk[32], uint8_t *gtk_len, uint8_t *gtk_idx)
++{
++	uint8_t plain[256];
++	*gtk_len = 0;
++	if (!(info & 0x1000) || dlen < 24 || dlen > sizeof(plain) + 8 || !aes_unwrap(s_ptk + 16, k + 95, dlen, plain)) {
++		return false;
++	}
++	for (uint32_t o = 0; o + 2 <= (uint32_t)dlen - 8 && o + 2 + plain[o + 1] <= (uint32_t)dlen - 8; o += 2 + plain[o + 1]) {
++		if (plain[o] == 0xDD && plain[o + 1] >= 6 && plain[o + 2] == 0x00 && plain[o + 3] == 0x0F &&
++		    plain[o + 4] == 0xAC && plain[o + 5] == 0x01) {
++			*gtk_idx = plain[o + 6] & 3;
++			*gtk_len = (uint8_t)MIN((uint32_t)plain[o + 1] - 6, 32u);
++			memcpy(gtk, plain + o + 8, *gtk_len);
++		}
++	}
++	bzero(plain, sizeof(plain));
++	return *gtk_len != 0;
+ }
+ 
+ static bool
+@@ -5425,7 +5446,7 @@ w_eapol_rx(const uint8_t *e, size_t elen)
+ {
+ 	uint8_t frame[512];
+ 	const uint8_t *src = e + 6;
+-	if (s_state != S_4WAY || elen < 14 + 4 + 95 || elen - 14 > sizeof(frame) || memcmp(src, s_bssid, 6) != 0) {
++	if ((s_state != S_4WAY && s_state != S_UP) || elen < 14 + 4 + 95 || elen - 14 > sizeof(frame) || memcmp(src, s_bssid, 6) != 0) {
+ 		return;
+ 	}
+ 	size_t len = elen - 14;
+@@ -5443,7 +5464,7 @@ w_eapol_rx(const uint8_t *e, size_t elen)
+ 		return;
+ 	}
+ 	bool pairwise = info & 0x0008, ack = info & 0x0080, has_mic = info & 0x0100, install = info & 0x0040;
+-	if (pairwise && ack && !has_mic) {
++	if (s_state == S_4WAY && pairwise && ack && !has_mic) {
+ 		/* message 1: ANonce -> PTK, answer with message 2 */
+ 		if (++s_msg1s > 3) {
+ 			LOG("t=%u ms: wpa: the AP keeps sending message 1: wrong passphrase", g_ms);
+@@ -5465,7 +5486,7 @@ w_eapol_rx(const uint8_t *e, size_t elen)
+ 		LOG("t=%u ms: wpa: message 1 -> message 2 sent", g_ms);
+ 		return;
+ 	}
+-	if (pairwise && ack && has_mic && install) {
++	if (s_state == S_4WAY && pairwise && ack && has_mic && install) {
+ 		/* message 3: check, unwrap the GTK, answer with message 4, install the keys */
+ 		if (!w_eapol_mic_ok(frame, len)) {
+ 			LOG("t=%u ms: wpa: message 3 MIC wrong: wrong passphrase", g_ms);
+@@ -5473,18 +5494,8 @@ w_eapol_rx(const uint8_t *e, size_t elen)
+ 			return;
+ 		}
+ 		s_replay = replay;
+-		uint8_t plain[256];
+ 		uint8_t gtk[32], gtk_len = 0, gtk_idx = 1;
+-		if ((info & 0x1000) && dlen >= 24 && dlen <= sizeof(plain) + 8 && aes_unwrap(s_ptk + 16, k + 95, dlen, plain)) {
+-			for (uint32_t o = 0; o + 2 <= (uint32_t)dlen - 8 && o + 2 + plain[o + 1] <= (uint32_t)dlen - 8; o += 2 + plain[o + 1]) {
+-				if (plain[o] == 0xDD && plain[o + 1] >= 6 && plain[o + 2] == 0x00 && plain[o + 3] == 0x0F &&
+-				    plain[o + 4] == 0xAC && plain[o + 5] == 0x01) {
+-					gtk_idx = plain[o + 6] & 3;
+-					gtk_len = (uint8_t)MIN((uint32_t)plain[o + 1] - 6, 32u);
+-					memcpy(gtk, plain + o + 8, gtk_len);
+-				}
+-			}
+-		}
++		(void)w_gtk_unwrap(k, info, dlen, gtk, &gtk_len, &gtk_idx);
+ 		w_eapol_send(0x030A, NULL, NULL, 0);
+ 		IOSleep(5);                             /* message 4 out in the clear before the keys go in */
+ 		w_install_key(false, 0, WMI_CIPHER_CCMP, s_ptk + 32, 16);
+@@ -5498,6 +5509,26 @@ w_eapol_rx(const uint8_t *e, size_t elen)
+ 		w_join_end(0);
+ 		return;
+ 	}
++	if (s_state == S_UP && !pairwise && ack && has_mic) {
++		/*
++		 * rain: group key handshake (the AP renews the GTK every few minutes). Unanswered,
++		 * the AP drops the link with reason 16 (group key handshake timeout).
++		 */
++		if (replay <= s_replay || !w_eapol_mic_ok(frame, len)) {
++			LOG("t=%u ms: wpa: group message 1 dropped (replay %llu, last %llu)", g_ms, (unsigned long long)replay, (unsigned long long)s_replay);
++			return;
++		}
++		s_replay = replay;
++		uint8_t gtk[32], gtk_len = 0, gtk_idx = 1;
++		if (!w_gtk_unwrap(k, info, dlen, gtk, &gtk_len, &gtk_idx)) {
++			LOG("t=%u ms: wpa: group message 1 without a GTK", g_ms);
++			return;
++		}
++		w_eapol_send(0x0302, NULL, NULL, 0, false);   /* message 2: MIC + secure, sent protected */
++		w_install_key(true, gtk_idx, s_group_cipher == 2 ? WMI_CIPHER_TKIP : WMI_CIPHER_CCMP, gtk, gtk_len);
++		bzero(gtk, sizeof(gtk));
++		LOG("t=%u ms: wpa: group key renewed (idx %u)", g_ms, gtk_idx);
++	}
+ }
+ 
+ /* ---- the join, step by step from the modem thread */
