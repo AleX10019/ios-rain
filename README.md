@@ -5,8 +5,7 @@
 
 As of **2026-11-14** the phone boots into the **iOS home screen** with **touch**, the volume and lock
 keys, the **Adreno GPU drawing the interface at 36–49 frames a second**, **sound through the speaker**,
-the **battery level**, **vibration**, the **clock**, **110 GB of storage**, the **brightness slider** and a real **Shut Down**.
-Wi-Fi does not work yet. This is an experiment, not a usable phone OS.
+the **battery level**, **vibration**, the **clock**, **110 GB of storage**, the **brightness slider**, a real **Shut Down** and **Wi-Fi** (Safari loads pages). This is an experiment, not a usable phone OS.
 
 Website: **<https://taynotfound.github.io/ios-rain/>**
 
@@ -53,12 +52,12 @@ values in the shim and `tools/mkadt.py`, `build-rain/`, and the porting log
 | Vibration | Works (GPIO 36, 0991) |
 | Audio | **Works** with `adsp=1`: rain's own ADSP firmware (APR/Elite), AFE, SoundWire codec, AW87390 amp (0990, 1003, 1008), iOS through the RedwoodAudio HAL plug-in and Apple's VirtualAudio router. `adsp_tone=N` plays a test chime at boot (1009) |
 | Brightness | Works with `sweetbl=1` (1004, 1014): the slider sets the panel over DSI (DCS 0x51); the backlight publishes `IODisplayParameters` so CoreBrightness drives it instead of dimming in software. 57 fps with it on |
-| Wi-Fi | Not yet: WCN3950; topaz's modem/WLFW code is in the tree, the plan is in [docs/CONNECTIVITY-rain.md](docs/CONNECTIVITY-rain.md) |
+| Wi-Fi | **Works** with `modem=1 wifi=1` (1015): the modem boots from `modem_a` (firmware, tftp files and `bdwlan.bin` found by name in its FAT), WCN3950 firmware WLAN.HL.3.2.4 reaches mission mode, scans 2.4 and 5 GHz, joins WPA2 networks; iOS Settings and Safari work over it. Do not add `modem_watch=1` (it stops serving the modem after N seconds). Known: the AP drops the link after a few minutes (reason 16, group rekey not answered); WPA2-PSK only; slow pages |
 | Cellular, Bluetooth, camera, sensors | Not started (sensors: [docs/SENSORS-rain.md](docs/SENSORS-rain.md)) |
 
 ### Next
 
-Wi-Fi; Bluetooth (a real driver, then bluetoothd back); the the final kernel in `boot_a` with sound, clock, USB power-up and power-off.
+Wi-Fi rekeying (the link drops after minutes) and speed; Bluetooth (a real driver, then bluetoothd back); the the final kernel in `boot_a` with sound, clock, USB power-up and power-off.
 
 Security is off, as upstream: permissive AMFI and sandbox, no data protection.
 
