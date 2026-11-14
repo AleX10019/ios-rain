@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sat, 14 Nov 2026 22:20:00 +0100
+Subject: [PATCH] rain-1018: one FAT reader at a time (ADSP and modem race)
+
+F13: "modem.mdt: bad ELF header" again, one boot after F12 loaded the
+same file through the same code. TopazAudio (adsp=1) loads its firmware
+from the same modem-partition FAT at the same time, and the FAT reader's
+state (mount, FAT copy) is shared without a lock. topaz_part_fw_size and
+topaz_part_fw_read now hold a mutex.
+---
+diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
+index 09d6dd7..cdd7051 100644
+--- a/iokit/Kernel/arm/TopazModem.cpp
++++ b/iokit/Kernel/arm/TopazModem.cpp
+@@ -17,6 +17,7 @@
+ 
+ #if defined(SWEET)
+ #include <IOKit/IOLib.h>
++#include <IOKit/IOLocks.h>
+ #include <IOKit/IOMemoryDescriptor.h>
+ #include <kern/thread.h>
+ #include <pexpert/pexpert.h>
+@@ -6433,6 +6434,10 @@ fat_rd(uint64_t off, void *dst, uint64_t len)
+ 	return sweet_ufs_read_part(fw_part, off, dst, len);
+ }
+ 
++/* rain: the ADSP (TopazAudio) and the modem load firmware at the same time; one FAT reader */
++LCK_GRP_DECLARE(topaz_fat_grp, "topaz_fat");
++static LCK_MTX_DECLARE(fat_mtx, &topaz_fat_grp);
++
+ static void *
+ fat_alloc(uint32_t n)
+ {
+@@ -6644,7 +6649,10 @@ extern "C" int64_t
+ topaz_part_fw_size(const char *path)
+ {
+ 	uint32_t clus, size;
+-	if (fat_lookup(path, &clus, &size)) {
++	lck_mtx_lock(&fat_mtx);
++	bool found = fat_lookup(path, &clus, &size);
++	lck_mtx_unlock(&fat_mtx);
++	if (found) {
+ 		return size;
+ 	}
+ 	int i = fw_all_find(path);
+@@ -6655,8 +6663,12 @@ extern "C" bool
+ topaz_part_fw_read(const char *path, uint64_t off, void *dst, uint64_t n)
+ {
+ 	uint32_t clus, size;
+-	if (fat_lookup(path, &clus, &size)) {
+-		return fat_read_file(clus, size, off, dst, n);
++	lck_mtx_lock(&fat_mtx);
++	bool found = fat_lookup(path, &clus, &size);
++	bool ok = found && fat_read_file(clus, size, off, dst, n);
++	lck_mtx_unlock(&fat_mtx);
++	if (found) {
++		return ok;
+ 	}
+ 	int i = fw_all_find(path);
+ 	return i >= 0 && off + n <= fw_all[i].size && fw_all_read(i, off, dst, n);
