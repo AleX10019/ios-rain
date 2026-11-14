@@ -57,7 +57,7 @@ values in the shim and `tools/mkadt.py`, `build-rain/`, and the porting log
 
 ### Next
 
-Wi-Fi rekeying (the link drops after minutes) and speed; Bluetooth (a real driver, then bluetoothd back); the the final kernel in `boot_a` with sound, clock, USB power-up and power-off.
+Wi-Fi rekeying (the link drops after minutes) and speed; Bluetooth (a real driver, then bluetoothd back); the final kernel in `boot_a` with sound, clock, USB power-up, power-off, brightness and Wi-Fi.
 
 Security is off, as upstream: permissive AMFI and sandbox, no data protection.
 
