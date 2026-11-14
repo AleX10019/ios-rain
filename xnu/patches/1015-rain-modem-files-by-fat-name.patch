@@ -1,0 +1,143 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sat, 14 Nov 2026 21:30:00 +0100
+Subject: [PATCH] rain-1015: modem firmware, tftp and Wi-Fi board data by FAT name
+
+F9 (modem=1): SMMU, SMEM and PAS were fine, then "modem.mdt: crc32 ...
+modem_a is not the image this was made for / bad ELF header": the modem
+loader still read topaz's fixed modem_a offsets. 0990's FAT lookup was
+only used for the ADSP. fw_size/fw_read (modem.mdt, modem.bNN), the
+modem's tftp server and the WLFW board data (bdwlan.*) now look files up
+by name (image/<name>) first, with the topaz table as the fallback.
+---
+diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
+index a11449f..e38c68f 100644
+--- a/iokit/Kernel/arm/TopazModem.cpp
++++ b/iokit/Kernel/arm/TopazModem.cpp
+@@ -219,9 +219,28 @@ fw_find(const char *name)
+ 	return -1;
+ }
+ 
++/*
++ * rain: the table above holds topaz's modem_a offsets; another phone's image has other ones.
++ * Look the file up by name in the partition's FAT first (0990's reader, /image/<name>).
++ */
++extern "C" int64_t topaz_part_fw_size(const char *path);
++extern "C" bool topaz_part_fw_read(const char *path, uint64_t off, void *dst, uint64_t n);
++
++static int64_t
++fw_fat_size(const char *name)
++{
++	char path[48];
++	snprintf(path, sizeof(path), "image/%s", name);
++	return topaz_part_fw_size(path);
++}
++
+ static int64_t
+ fw_size(const char *name)
+ {
++	int64_t n = fw_fat_size(name);
++	if (n >= 0) {
++		return n;
++	}
+ 	int i = fw_find(name);
+ 	return i < 0 ? -1 : (int64_t)fw_files[i].size;
+ }
+@@ -230,6 +249,16 @@ fw_size(const char *name)
+ static int64_t
+ fw_read(const char *name, void *dst, uint64_t max)
+ {
++	int64_t n = fw_fat_size(name);
++	if (n >= 0) {
++		char path[48];
++		snprintf(path, sizeof(path), "image/%s", name);
++		if ((uint64_t)n > max || !topaz_part_fw_read(path, 0, dst, (uint64_t)n)) {
++			LOG("%s: FAT read failed (size %lld, room %llu)", name, n, max);
++			return -1;
++		}
++		return n;
++	}
+ 	int i = fw_find(name), err;
+ 
+ 	if (i < 0 || fw_files[i].size > max) {
+@@ -2525,7 +2554,8 @@ pdm_rx(uint32_t node, uint32_t port, uint16_t txn, uint16_t msg, const uint8_t *
+ struct tftp_sess {
+ 	bool used, write;
+ 	uint32_t port, node, rport;
+-	int fi;                                 /* fw_all index, -1 = none */
++	int fi;                                 /* >= 0: a firmware file (fpath), -1 = none */
++	char fpath[96];                         /* rain: read by name (FAT first, then fw_all) */
+ 	int rw;                                 /* /readwrite file in RAM, -1 = none */
+ 	uint64_t size, sent;
+ 	uint32_t blk, rsize, wsize, seek;
+@@ -2618,7 +2648,7 @@ tftp_data(struct tftp_sess *s, uint32_t block, uint64_t offset, uint32_t resp_si
+ 		n = (uint32_t)MIN((uint64_t)n, s->size - offset);
+ 		if (s->rw >= 0) {
+ 			memcpy(b + 4, rw_files[s->rw].data + offset, n);
+-		} else if (!fw_all_read(s->fi, offset, b + 4, n)) {
++		} else if (!topaz_part_fw_read(s->fpath, offset, b + 4, n)) {
+ 			LOG("tftp sess %x: read FAILED at %llu", s->port, offset);
+ 			IOFree(b, s->blk + 4);
+ 			tftp_error(s, 0, "Read error");
+@@ -2773,14 +2803,17 @@ tftp_request(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
+ 		s->size = rw_files[s->rw].size;
+ 		LOG("t=%u ms: tftp RRQ %s (RAM, %llu B)", g_ms, file, s->size);
+ 	} else {
+-		if (!tftp_map(file, path, sizeof(path)) || (s->fi = fw_all_find(path)) < 0) {
++		int64_t fsize = tftp_map(file, path, sizeof(path)) ? topaz_part_fw_size(path) : -1;
++		if (fsize < 0) {
+ 			tftp_missing++;
+ 			LOG("t=%u ms: tftp RRQ %s: not found", g_ms, file);
+ 			tftp_error(s, 1, "file not found");
+ 			tftp_close(s);
+ 			return;
+ 		}
+-		s->size = fw_all[s->fi].size;
++		s->fi = 0;
++		strlcpy(s->fpath, path, sizeof(s->fpath));
++		s->size = (uint64_t)fsize;
+ 		LOG("t=%u ms: tftp RRQ %s seek %u rsize %u blk %u w %u (%llu B)", g_ms, path, s->seek, s->rsize, s->blk, s->wsize, s->size);
+ 	}
+ 	if (!opts) {
+@@ -3069,6 +3102,7 @@ static uint32_t w_node, w_port, w_board = 0xFF, w_bdf_seg;
+ static uint16_t w_txn = 1;
+ static bool w_msa_ind, w_cap_done, w_bdf_started, w_fw_ready, w_mission;
+ static int w_bdf_fi = -1;
++static char w_bdf_path[40];                 /* rain: read by name (FAT first) */
+ static uint32_t w_bdf_len, w_bdf_off;
+ static const char *w_step = "not started";
+ 
+@@ -3168,7 +3202,7 @@ w_bdf_segment(void)
+ 	t[0] = 0x13;
+ 	memcpy(t + 1, &tl, 2);
+ 	memcpy(t + 3, &dl, 2);
+-	if (!fw_all_read(w_bdf_fi, w_bdf_off, t + 5, chunk)) {
++	if (!topaz_part_fw_read(w_bdf_path, w_bdf_off, t + 5, chunk)) {
+ 		LOG("wlfw: board data read failed");
+ 		IOFree(m.b, WLFW_SEG + 128);
+ 		return;
+@@ -3197,17 +3231,19 @@ w_start_bdf(void)
+ 	} else {
+ 		snprintf(name, sizeof(name), "image/bdwlan.%03x", w_board);
+ 	}
+-	w_bdf_fi = fw_all_find(name);
+-	if (w_bdf_fi < 0) {
++	int64_t bsize = topaz_part_fw_size(name);
++	if (bsize < 0) {
+ 		LOG("wlfw: %s missing, using bdwlan.bin", name);
+ 		snprintf(name, sizeof(name), "image/bdwlan.bin");
+-		w_bdf_fi = fw_all_find(name);
++		bsize = topaz_part_fw_size(name);
+ 	}
+-	if (w_bdf_fi < 0) {
++	if (bsize < 0) {
+ 		LOG("wlfw: no board data file");
+ 		return;
+ 	}
+-	w_bdf_len = fw_all[w_bdf_fi].size;
++	w_bdf_fi = 0;
++	strlcpy(w_bdf_path, name, sizeof(w_bdf_path));
++	w_bdf_len = (uint32_t)bsize;
+ 	w_bdf_off = 0;
+ 	w_bdf_seg = 0;
+ 	LOG("t=%u ms: wlfw: board data %s, %u bytes", g_ms, name, w_bdf_len);
