@@ -5,8 +5,8 @@
 
 As of **2026-11-14** the phone boots into the **iOS home screen** with **touch**, the volume and lock
 keys, the **Adreno GPU drawing the interface at 36–49 frames a second**, **sound through the speaker**,
-the **battery level**, **vibration**, the **clock**, **110 GB of storage** and a real **Shut Down**.
-Wi-Fi and brightness do not work yet. This is an experiment, not a usable phone OS.
+the **battery level**, **vibration**, the **clock**, **110 GB of storage**, the **brightness slider** and a real **Shut Down**.
+Wi-Fi does not work yet. This is an experiment, not a usable phone OS.
 
 Website: **<https://taynotfound.github.io/ios-rain/>**
 
@@ -45,21 +45,20 @@ values in the shim and `tools/mkadt.py`, `build-rain/`, and the porting log
 | Display | Works: `sweetfb_fit=3` scales the 1125×2436 canvas to 740×1650 and cuts 10 columns off each side; `sweetfb_hwscale=1` does it in the display controller's own scaler (no CPU copy, 1006) |
 | GPU | Works (`gpu=1 gpu_mhz=600`): Adreno 610 through Mesa freedreno (user space built by `.github/workflows/userland.yml`, installed with `build-rain/install-gpu-root.sh`). **36–49 fps** |
 | Touch | Works (0962–0984), also after locking and unlocking. Novatek NT36525B over SPI through GPI DMA; Xiaomi's firmware uploaded at boot and on every panel wake |
-| Keys | Volume and lock keys work. Volume up + down for 3 s reboots into fastboot (0989) |
+| Keys | Volume and lock keys work. Volume up + down for 3 s reboots into fastboot (0989); Power + Volume down for 3 s shuts down cleanly (1012) |
 | Clock | Works (1006): the PM6125 RTC plus boot arg `rtc_off` (the RTC is read-only to Linux/XNU and resets when the battery runs flat). Set the timezone by hand in Settings > General > Date & Time (automatic needs a location fix) |
 | Live log | Works: `sweetusb=2` (from `fastboot boot`) or `sweetusb=3` (also powers USB up itself, for boots from `boot_a`, 1006/1007) makes the phone a USB network device that streams the kernel log |
 | Battery | Works: SH366101 gauge at SE1 `0x55` (level, voltage, current, temperature; 0997–1002) |
 | Charging | Works: SMB1351 charger, high-current mode on wall chargers (1001); a PC port stays at 500 mA |
 | Vibration | Works (GPIO 36, 0991) |
 | Audio | **Works** with `adsp=1`: rain's own ADSP firmware (APR/Elite), AFE, SoundWire codec, AW87390 amp (0990, 1003, 1008), iOS through the RedwoodAudio HAL plug-in and Apple's VirtualAudio router. `adsp_tone=N` plays a test chime at boot (1009) |
-| Brightness | Driver written (1004, `sweetbl=1`), not yet tested |
+| Brightness | Works with `sweetbl=1` (1004, 1014): the slider sets the panel over DSI (DCS 0x51); the backlight publishes `IODisplayParameters` so CoreBrightness drives it instead of dimming in software. 57 fps with it on |
 | Wi-Fi | Not yet: WCN3950; topaz's modem/WLFW code is in the tree, the plan is in [docs/CONNECTIVITY-rain.md](docs/CONNECTIVITY-rain.md) |
 | Cellular, Bluetooth, camera, sensors | Not started (sensors: [docs/SENSORS-rain.md](docs/SENSORS-rain.md)) |
 
 ### Next
 
-Wi-Fi; brightness (test 1004); Bluetooth (a real driver, then bluetoothd back); the power-off button
-combination; the final kernel in `boot_a` with sound, clock, USB power-up and power-off.
+Wi-Fi; Bluetooth (a real driver, then bluetoothd back); the the final kernel in `boot_a` with sound, clock, USB power-up and power-off.
 
 Security is off, as upstream: permissive AMFI and sandbox, no data protection.
 
