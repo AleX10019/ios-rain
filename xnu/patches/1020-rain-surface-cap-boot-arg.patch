@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sat, 14 Nov 2026 22:55:00 +0100
+Subject: [PATCH] rain-1020: sweetsurf_mb, the surface cap as a boot-arg
+
+After a fresh userdata PosterBoard renders every wallpaper snapshot at
+once (CollectionsPoster, 12 MB surfaces) and runs into the 768 MB cap
+(0995); its creates fail, the posters crash-loop and the setup never
+finishes (1013 keeps them out instead). On an older install with the
+snapshots cached they ran at ~220 MB. sweetsurf_mb=N (256..1536) sets
+the cap for one boot so the setup can complete; default stays 768 MB.
+---
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index ae846b5..83644fe 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -113,6 +113,22 @@ static uint32_t      sweet_surface_next_id = 1;
+ static uint32_t      sweet_surface_creates_logged;
+ static uint64_t      sweet_surface_wired;       /* bytes of buffer surfaces */
+ #define SWEET_SURFACE_WIRED_MAX         (768ull << 20)    /* rain: the kernel has 2 GiB; a leak must fail creates, not starve the system */
++/*
++ * rain: boot-arg sweetsurf_mb=N raises (or lowers) the cap for one boot: after a fresh userdata,
++ * PosterBoard renders every wallpaper snapshot at once (12 MB each) and needs more than 768 MB
++ * until they are cached.
++ */
++static uint64_t
++sweet_surface_wired_max(void)
++{
++	static uint64_t max;
++	if (max == 0) {
++		uint32_t mb = 0;
++		max = PE_parse_boot_argn("sweetsurf_mb", &mb, sizeof(mb)) && mb >= 256 && mb <= 1536 ?
++		    (uint64_t)mb << 20 : SWEET_SURFACE_WIRED_MAX;
++	}
++	return max;
++}
+ 
+ /* topaz scanout: at most 6 contiguous 16 MiB surfaces */
+ #define SWEET_SCANOUT_SLOT      (16u << 20)
+@@ -1075,7 +1091,7 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 	if (ret == kIOReturnSuccess && s->memory == NULL) {
+ 		IOBufferMemoryDescriptor *mem = NULL;
+ 		if ((uint64_t)OSAddAtomic64(s->allocSize, (volatile SInt64 *)&sweet_surface_wired) +
+-		    s->allocSize <= SWEET_SURFACE_WIRED_MAX) {
++		    s->allocSize <= sweet_surface_wired_max()) {
+ 			static int gpu_low = -1;        /* boot-arg gpu=1: surfaces the Adreno draws into stay below 4 GiB */
+ 			if (gpu_low < 0) {
+ 				uint32_t on = 0;
