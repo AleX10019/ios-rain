@@ -87,7 +87,9 @@ def launchd(root):
         jobs['/System/Library/LaunchDaemons/org.rain.metal-boot.plist'] = {
             'Label': 'org.rain.metal-boot', 'ProgramArguments': ['/redwood/bin/metal_boot'],
             'RunAtLoad': True, 'KeepAlive': False, 'LaunchOnlyOnce': True, 'UserName': 'root',
-            'StandardOutPath': '/dev/console', 'StandardErrorPath': '/dev/console'}
+            # /dev/console drops user writes once the system is up; boot with
+            # sweetnull=...,metal_boot,metal_props,metal_drv_test and the kernel tees /dev/null to the log
+            'StandardOutPath': '/dev/null', 'StandardErrorPath': '/dev/null'}
         print('launchd.plist: org.rain.metal-boot job installed')
     save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
     print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} CommCenter jobs removed')

@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sat, 14 Nov 2026 23:30:00 +0100
+Subject: [PATCH] rain-1022: noise and SNR in the network and link event
+
+With NOISE answered (1019) the status bar still drew no Wi-Fi bars:
+wifid asks RSSI and NOISE once, then rates the link from CURRENT_NETWORK
+and the link event, which carried noise 0 and SNR 0. Both now carry the
+-95 dBm floor and SNR = RSSI + 95.
+---
+diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
+index bd6884e..917744b 100644
+--- a/bsd/dev/redwood_apple80211.c
++++ b/bsd/dev/redwood_apple80211.c
+@@ -195,6 +195,8 @@ _Static_assert(sizeof(struct apple80211_scan_result) == 1164 && offsetof(struct
+ enum { EVENT_POWER_CHANGED = 1, EVENT_SSID_CHANGED = 2, EVENT_BSSID_CHANGED = 3, EVENT_LINK_CHANGED = 4, EVENT_ASSOC_DONE = 9,
+        EVENT_SCAN_DONE = 10 };
+ 
++#define NOISE_FLOOR             (-95)   /* dBm; the radio does not report one */
++
+ static const char interface_name[16] = "en0";   /* (bsd/dev/redwood_net.c makes one interface, and that is its name) */
+ 
+ static LCK_GRP_DECLARE(apple80211_lock_group, "redwood-apple80211");
+@@ -259,6 +261,9 @@ give_network(const struct apple80211req *request, const struct redwood_sta_bss *
+ 	result->version = 1;
+ 	channel_fill(&result->channel, bss->frequency, 0);
+ 	result->rssi = bss->rssi;
++	result->noise_known = 1;                /* rain: the bars are signal over noise; 0/0 drew none */
++	result->noise = NOISE_FLOOR;
++	result->snr = (int16_t)(bss->rssi - NOISE_FLOOR);
+ 	result->beacon_interval = bss->beacon_interval;
+ 	result->capability = bss->capability;
+ 	memcpy(result->bssid, bss->bssid, sizeof(result->bssid));
+@@ -437,7 +442,7 @@ get(struct apple80211req *request)
+ 		struct {
+ 			uint32_t version, radios, unit;
+ 			int32_t each[4], all, each_ext[4], all_ext;
+-		} answer = { .version = 1, .radios = 1, .each = { -95 }, .all = -95, .each_ext = { -95 }, .all_ext = -95 };
++		} answer = { .version = 1, .radios = 1, .each = { NOISE_FLOOR }, .all = NOISE_FLOOR, .each_ext = { NOISE_FLOOR }, .all_ext = NOISE_FLOOR };
+ 
+ 		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
+ 		break;
+@@ -657,6 +662,8 @@ redwood_apple80211_event(enum redwood_sta_event event, int status)
+ 		if (state != NULL) {
+ 			redwood_sta_state(state);
+ 			link.rssi = status == 1 ? state->bss.rssi : 0;
++			link.noise = (uint16_t)NOISE_FLOOR;
++			link.snr = status == 1 ? (uint16_t)(state->bss.rssi - NOISE_FLOOR) : 0;
+ 			kfree_data(state, sizeof(*state));
+ 		}
+ 		post(EVENT_SSID_CHANGED, NULL, 0);
