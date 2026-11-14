@@ -25,9 +25,20 @@ $CC -bundle -framework CoreFoundation -I"$G/../audio" -o "$O/RedwoodAudio" "$G/.
 cp "$G/../audio/audio_plugin.plist" "$O/RedwoodAudio.Info.plist"
 # one-shot: grow the 16 GiB HFS+ root to fill userdata (launchd org.rain.hfs-grow)
 $CC -o "$O/hfs-grow" "$G/../tools/hfs_grow.c"
+# Metal (from HakiOS, ../metal, MIT): the driver as the bundle Metal's discovery opens
+# (/System/Library/Extensions/RedwoodMetal.bundle -> /redwood/lib), its test program, the
+# switch that puts MetalPluginName/ClassName on IOAcceleratorES, and the shader compiler from
+# the Mesa build. No ARC (objc_msgSend by hand); _MTLDevice is Metal-private, so it binds at run time.
+MT="$G/../metal"
+$CC -bundle -framework Foundation -framework IOKit -framework Metal -lobjc -Wl,-U,_OBJC_CLASS_\$__MTLDevice \
+	-Wl,-U,_OBJC_METACLASS_\$__MTLDevice -o "$O/RedwoodMetal" "$MT/redwoodmetal.m" "$MT/redwooddrawable.m"
+cp "$MT/metal_plugin.plist" "$O/RedwoodMetal.Info.plist"
+$CC -framework Foundation -framework IOKit -framework Metal -lobjc -o "$O/metal_drv_test" "$MT/metal_drv_test.m"
+$CC -framework CoreFoundation -framework IOKit -o "$O/metal_props" "$MT/metal_props.c"
+cp "$M/libredwoodair.dylib" "$O/"
 cp "$M/libOSMesa.8.dylib" "$O/"
 # Ad-hoc signatures: the kernel's AMFI stand-in makes every *signed* binary on the root a platform
 # binary, and launchd panics when a system job execs one that is not ("unexpected exec of non-platform binary").
-codesign -f -s - "$O/backboardd" "$O/RedwoodAudio" "$O/hfs-grow" "$O"/*.dylib
+codesign -f -s - "$O/backboardd" "$O/RedwoodAudio" "$O/hfs-grow" "$O/RedwoodMetal" "$O/metal_drv_test" "$O/metal_props" "$O"/*.dylib
 rm -rf "$O/inc"
 ls -l "$O"

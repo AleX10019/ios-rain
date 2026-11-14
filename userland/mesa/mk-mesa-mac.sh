@@ -1,6 +1,7 @@
 #!/bin/bash
 # Private, local only: Mesa 25.0.7 (freedreno + softpipe) for the iOS 16 userland, built on the Mac
-# with Xcode's clang (adapted from darwin-redwood tools/mk-mesa.sh; their patches in ../mesa).
+# with Xcode's clang (adapted from darwin-redwood tools/mk-mesa.sh; their patches in ../mesa),
+# plus the AIR frontend for Metal (mesa/air) and libredwoodair.dylib.
 set -e
 VERSION=25.0.7
 SHA256=592272df3cf01e85e7db300c449df5061092574d099da275d19e97ef0510f8a6
@@ -20,6 +21,9 @@ if [ ! -d mesa-$VERSION ] || [ "$(cat mesa-$VERSION/.redwood-patches 2>/dev/null
 fi
 rm -rf mesa-$VERSION/src/redwood-drm
 cp -r "$ROOT/mesa/redwood-drm" mesa-$VERSION/src/redwood-drm
+# the AIR (Metal shader) frontend from HakiOS (mesa/air, MIT): air-frontend.patch is the meson that reaches it
+rm -rf mesa-$VERSION/src/compiler/air
+cp -r "$ROOT/mesa/air" mesa-$VERSION/src/compiler/air
 if [ ! -x venv/bin/python3 ]; then
 	python3 -m venv venv
 	venv/bin/pip -q install mako pyyaml packaging
@@ -57,6 +61,11 @@ BUILD=build-${DRIVERS//,/-}
 	-Dgallium-xa=disabled -Dlmsensors=disabled -Dbuild-tests=false > meson-setup.log
 ninja -C $BUILD > ninja.log
 mkdir -p out
+# the compiler library the Metal driver (../metal/redwoodmetal.m) dlopens at /redwood/lib/libredwoodair.dylib
+ninja -C $BUILD src/gallium/drivers/freedreno/libredwoodair.dylib >> ninja.log
+$(xcrun -f strip) -x -o out/libredwoodair.dylib $BUILD/src/gallium/drivers/freedreno/libredwoodair.dylib
+install_name_tool -id /redwood/lib/libredwoodair.dylib out/libredwoodair.dylib
+echo "libredwoodair: $(nm -gU out/libredwoodair.dylib | grep -c ' _rwa_') rwa_* functions"
 $(xcrun -f strip) -x -o out/libOSMesa.8.dylib $BUILD/src/gallium/targets/osmesa/libOSMesa.8.dylib
 install_name_tool -id /topaz/lib/libOSMesa.8.dylib out/libOSMesa.8.dylib
 nm -gU out/libOSMesa.8.dylib | awk '$3 ~ /^_gl/ { print substr($3, 2) }' > out/exported-gl.txt
