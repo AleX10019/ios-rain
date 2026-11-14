@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sat, 14 Nov 2026 21:00:00 +0100
+Subject: [PATCH] rain-1014: backlight IODisplayParameters for CoreBrightness
+
+With sweetbl=1 the slider sent nothing to the driver and backboardd
+left the GPU path (60 GPU frames per boot instead of thousands: iOS
+dimmed in software). ios-sweet 0130 found that CoreBrightness drives a
+backlight with IODisplayParameters brightness {min 0, max 65536, value}
+and then sets "brightness" (a number or {value}, top level or inside
+IODisplayParameters). The service is named "backlight", publishes that
+dictionary, and maps 0..65536 onto IOMFBBrightnessLevel (16.16 nits).
+---
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 1818047..4d8544c 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -278,10 +278,39 @@ class AppleARMBacklight : public IOService {
+ public:
+ 	AppleCLCD *fFB;
+ 	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
++	void publishLevel(uint32_t value);     /* IODisplayParameters brightness, 0..65536 */
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleARMBacklight, IOService);
+ 
++void
++AppleARMBacklight::publishLevel(uint32_t value)
++{
++	OSDictionary *params = OSDictionary::withCapacity(1), *b = OSDictionary::withCapacity(3);
++	OSNumber *min = OSNumber::withNumber(0ULL, 32), *max = OSNumber::withNumber(65536ULL, 32);
++	OSNumber *val = OSNumber::withNumber((unsigned long long)value, 32);
++	if (params && b && min && max && val) {
++		b->setObject("min", min);
++		b->setObject("max", max);
++		b->setObject("value", val);
++		params->setObject("brightness", b);
++		setProperty("IODisplayParameters", params);
++	}
++	OSSafeReleaseNULL(min);
++	OSSafeReleaseNULL(max);
++	OSSafeReleaseNULL(val);
++	OSSafeReleaseNULL(b);
++	OSSafeReleaseNULL(params);
++}
++
++/* a number, or a dictionary with "value" */
++static OSNumber *
++sweet_bl_num(OSObject *o)
++{
++	OSDictionary *d = OSDynamicCast(OSDictionary, o);
++	return OSDynamicCast(OSNumber, d ? d->getObject("value") : o);
++}
++
+ /*
+  * The graphics accelerator's service class. QuartzCore (CAMetalContextCreate,
+  * once per process) polls IOServiceMatching("IOAcceleratorES") 300 times,
+@@ -443,6 +472,14 @@ AppleCLCD::start(IOService *provider)
+ 			bl->setProperty("backlight-control", true);
+ 			bl->setProperty("brightness-nits", (unsigned long long)200, 32);
+ 			bl->setProperty("max-nits", (unsigned long long)SWEET_FB_MAX_NITS, 32);
++			/*
++			 * rain: CoreBrightness only drives a backlight that has IODisplayParameters
++			 * brightness {min, max, value} (ios-sweet 0130: it then sends brightness 0..65536);
++			 * without it the slider sent nothing and iOS dimmed in software, off the GPU path.
++			 */
++			bl->setName("backlight");
++			bl->setProperty("DisplayStateControlSupported", false);
++			bl->publishLevel(65536u * 2 / 5);
+ 			if (bl->attach(this)) {
+ 				bl->registerService();
+ 				IOLog("SWEET FB: AppleARMBacklight published\n");
+@@ -1310,6 +1347,26 @@ AppleARMBacklight::setProperties(OSObject *properties)
+ {
+ 	OSDictionary *d = OSDynamicCast(OSDictionary, properties);
+ 	sweet_bl_log("backlight", d);
++	OSDictionary *params = d ? OSDynamicCast(OSDictionary, d->getObject("IODisplayParameters")) : NULL;
++	OSDictionary *src = params ? params : d;
++	OSNumber *b = src ? sweet_bl_num(src->getObject("brightness")) : NULL;
++	if (b != NULL && fFB != NULL) {
++		/* 0..65536 of the slider -> 16.16 nits of IOMFBBrightnessLevel */
++		uint64_t v = b->unsigned64BitValue();
++		if (v > 65536) {
++			v = 65536;
++		}
++		OSDictionary *m = OSDictionary::withCapacity(1);
++		OSNumber *nn = OSNumber::withNumber(v * SWEET_FB_MAX_NITS, 64);
++		if (m && nn) {
++			m->setObject("IOMFBBrightnessLevel", nn);
++			fFB->setProperties(m);
++		}
++		OSSafeReleaseNULL(nn);
++		OSSafeReleaseNULL(m);
++		publishLevel((uint32_t)v);
++		return kIOReturnSuccess;
++	}
+ 	OSNumber *n = d ? OSDynamicCast(OSNumber, d->getObject("brightness-nits")) : NULL;
+ 	if (n != NULL && fFB != NULL) {
+ 		OSDictionary *m = OSDictionary::withCapacity(1);
