@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sat, 14 Nov 2026 22:00:00 +0100
+Subject: [PATCH] rain-1017: no off-channel scans while joined
+
+F12: wifid asked for a scan every 7-30 s while joined (18 scans in 8
+minutes); each takes the radio off the AP's channel for ~3.5 s and
+Safari stalled. While joined, topaz_wlan_scan answers from the list of
+the last finished scan for up to 2 minutes (as ios-sweet's wland 0005
+answers from a list under 30 s old).
+---
+diff --git a/iokit/Kernel/arm/TopazModem.cpp b/iokit/Kernel/arm/TopazModem.cpp
+index ab9c8fa..09d6dd7 100644
+--- a/iokit/Kernel/arm/TopazModem.cpp
++++ b/iokit/Kernel/arm/TopazModem.cpp
+@@ -4227,6 +4227,7 @@ struct bss {
+ static struct bss bss[64];
+ static uint32_t nbss, scans, scan_frames;
+ static volatile uint32_t api_scans_done;
++static volatile uint32_t api_scan_ms;          /* g_ms of the last finished scan */
+ static bool scan_started, scanning;
+ static unsigned next_scan_ms;
+ 
+@@ -4520,6 +4521,7 @@ scan_event(const uint8_t *t, uint32_t len)
+ 		scans++;
+ 		LOG("t=%u ms: *** scan %u done (event %x): %u networks, %u beacons/probe responses, %u htt msdus ***", g_ms, scans, e[0], nbss, scan_frames, htt_msdus);
+ 		next_scan_ms = scans < 3 ? g_ms + 10000 : 0;
++		api_scan_ms = g_ms;
+ 		api_scans_done++;
+ 	}
+ }
+@@ -4660,12 +4662,21 @@ topaz_wlan_address(uint8_t address[6])
+ 	memcpy(address, our_mac, 6);
+ }
+ 
++static bool w_up(void);
++
+ int
+ topaz_wlan_scan(void)
+ {
+ 	if (!api_ready) {
+ 		return ENXIO;
+ 	}
++	/*
++	 * rain: wifid asks for a scan every 7-30 s even while joined; each one takes the radio off
++	 * the channel for ~3.5 s and Safari stalls. Joined, answer from the list for 2 minutes.
++	 */
++	if (w_up() && api_scan_ms != 0 && g_ms - api_scan_ms < 120000) {
++		return 0;
++	}
+ 	uint32_t before = api_scans_done;
+ 	api_scan_asked = true;
+ 	for (int i = 0; i < 300 && api_scans_done == before; i++) {   /* 30 s */
+@@ -5010,6 +5021,12 @@ w_crypto_selftest(void)
+ 
+ enum sta_state { S_IDLE, S_START, S_AUTH, S_ASSOC, S_4WAY, S_UP };
+ static volatile enum sta_state s_state;
++
++static bool
++w_up(void)
++{
++	return s_state == S_UP;
++}
+ static volatile int s_result;                   /* of the last join: 0 joined, else an errno (EAUTH: passphrase) */
+ static volatile bool s_join_asked, s_leave_asked;
+ static volatile uint32_t s_join_done;           /* bumped when a join ends either way */
