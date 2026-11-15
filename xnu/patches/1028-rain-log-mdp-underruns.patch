@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sun, 15 Nov 2026 05:10:00 +0100
+Subject: [PATCH] rain-1028: log MDP underruns with the INTF1 line
+
+Black lines and stale blocks show only with sweetfb_hwscale=1 (S1: Metal
+on, scaler off, no lines). VIG0 then fetches the whole 1125x2436 canvas
+for a 720-wide panel: maybe more than the MDP clock allows. Read and
+clear the MDP top interrupt status every 5 s; bit 26 is INTF1 underrun.
+---
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index dec86f4..b966aa3 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -663,9 +663,22 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		uint64_t sw;
+ 		uint32_t sn;
+ 		sweet_surface_stats(&sw, &sn);
+-		IOLog("SWEET INTF1: %u frames in 5 s (line %u, te_en %#x); mem: %u pages wired, %u free, %u surfaces %llu MB\n",
++		/*
++		 * rain: black lines/stale blocks only with the VIG0 scaler on. Underruns? MDP top interrupt
++		 * status (MDP 0x5e01000 + 0x14, clear +0x18; INTF1 underrun bit 26, Linux dpu_hw_interrupts).
++		 * Read and cleared here only; nothing enables these interrupts.
++		 */
++		static volatile uint32_t *mdpTop;
++		if (mdpTop == NULL) {
++			mdpTop = (volatile uint32_t *)ml_io_map(0x05e01000, 0x1000);
++		}
++		uint32_t intr = mdpTop ? mdpTop[0x14 / 4] : 0;
++		if (mdpTop) {
++			mdpTop[0x18 / 4] = intr;
++		}
++		IOLog("SWEET INTF1: %u frames in 5 s (line %u, te_en %#x); mem: %u pages wired, %u free, %u surfaces %llu MB; mdp intr %#x%s\n",
+ 		    frames - fb->fIntfFrames, fb->fIntf1[(0x800 + 0x0b0) / 4], fb->fIntf1[0x800 / 4],
+-		    vm_page_wire_count, vm_page_free_count, sn, sw >> 20);
++		    vm_page_wire_count, vm_page_free_count, sn, sw >> 20, intr, (intr & (1u << 26)) ? " UNDERRUN" : "");
+ 		fb->fIntfFrames = frames;
+ 	}
+ 	if (fb->fPowerOff) {
+-- 
+2.40.0
