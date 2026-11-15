@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sun, 15 Nov 2026 05:20:00 +0100
+Subject: [PATCH] rain-1030: power off straight after the disk sync
+
+U1 (1029): slide to power off froze right after "syncing disks...
+Killing all processes"; T1 got as far as the root unmount. The SoC
+wedges at a varying step once the kernel kills what is left. launchd
+has torn userspace down already: sync, wait for busy buffers, then
+PEHaltRestart, before IOKit's process-exit notification.
+---
+diff --git a/bsd/kern/kern_shutdown.c b/bsd/kern/kern_shutdown.c
+index 8281025..34dc6a5 100644
+--- a/bsd/kern/kern_shutdown.c
++++ b/bsd/kern/kern_shutdown.c
+@@ -224,6 +224,24 @@ reboot_kernel(int howto, char *message)
+ 
+ 	lck_mtx_unlock(&vm_swap_data_lock);
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * rain: past this point slide to power off wedged the whole SoC at a different step each time
++	 * (killing processes, the root unmount): the screen stayed on, USB and timers stopped. launchd has
++	 * torn userspace down already, so write the disks and go straight to the PMIC/PSCI path.
++	 */
++	if ((howto & RB_PANIC) == 0) {
++		int busy = 0;
++		if ((howto & RB_NOSYNC) == 0) {
++			sync((proc_t)NULL, (void *)NULL, (int *)NULL);
++			for (int i = 0; i < 50 && (busy = count_busy_buffers()) != 0; i++) {
++				delay_for_interval(100, 1000 * 1000);
++			}
++		}
++		printf("RAIN: disks synced (%d busy), %s now\n", busy, (howto & RB_HALT) ? "power off" : "restart");
++		PEHaltRestart((howto & RB_HALT) ? kPEHaltCPU : kPERestartCPU);
++	}
++#endif
+ 	/*
+ 	 * Notify the power management root domain that the system will shut down.
+ 	 */
+-- 
+2.40.0
