@@ -1,6 +1,6 @@
 # Metal on rain: research and plan
 
-Written 2026-11-14. Nothing here has run on the phone yet.
+Written 2026-11-14; results from 2026-11-15 below.
 
 ## Where Metal can come from
 
@@ -49,3 +49,17 @@ without those properties (SweetFramebuffer.cpp), so nothing uses Metal today.
 Risks: A610-specific limits (GMEM size, formats) the donor never met on the 642L; the IOSurface
 glue (our SweetSurface vs the donor's kernel); 30 % of the system's shaders do not translate yet.
 Estimate: a first triangle in 1-2 days of work, system use (wallpapers, Safari paths) several more.
+
+## Results on the phone (2026-11-15, kernels 1021-1023)
+
+- Boot args: `metal=1 metal_profile=1`, plus `sweetnull=...,metal_boot,metal_props,metal_drv_test`
+  (the test's stdout reaches the USB log only through the /dev/null tee) and
+  `metal_test=<args split at ':'>` for `/redwood/bin/metal_drv_test` (run once by org.rain.metal-boot).
+  Boot-args are cut at ~607 characters: keep `metal_test` last and drop `sweetfb_hwscale`/`sweetfps`.
+- `metal_profile=1` is required: with profile 0 SpringBoard aborts in MPS ("Failed to get MPSDevice").
+- Discovery works: `MTLCreateSystemDefaultDevice()` = RedwoodMetalDevice, all 420 required methods.
+- Compute: 11/11 AV1SW.metallib kernels compile through AIR -> ir3.
+- Render: `--picture 30 /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib`:
+  64/64 clearFragment shaders draw, 0 of 1,192,320 pixels wrong; 1080x648 targets read back whole.
+  The phone's screen did not visibly show the picture (open: the panel path of the GPU service).
+- When `metal=1` is set early, SpringBoard itself uses Metal (Siri sphere pipelines seen in M1).
