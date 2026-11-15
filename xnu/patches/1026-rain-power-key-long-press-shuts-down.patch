@@ -7,13 +7,32 @@ The bootloader leaves the PMIC's KPDPWR S2 reset as a reset, so holding
 power rebooted straight back into iOS, and the slider's power-off hangs
 before the kernel's halt path. Set the S2 reset type to shutdown at key
 init so holding power powers the phone off in hardware, no software or
-PC needed.
+PC needed. PS_HOLD's reset type is set to shutdown at init as well, so
+PSCI SYSTEM_OFF and ABL's "fastboot oem poweroff" stay off instead of
+restarting; restart and the fastboot key combo set their own type.
 ---
 diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
-index 75e6b77..73176e1 100644
+index 75e6b77..64eaff0 100644
 --- a/bsd/dev/sweet_keys.c
 +++ b/bsd/dev/sweet_keys.c
-@@ -192,6 +192,26 @@ keys_thread(void *arg, wait_result_t result)
+@@ -115,6 +115,8 @@ keys_write(uint16_t apid, uint16_t addr, uint8_t val)
+ 	return false;
+ }
+ 
++int sweet_pon_ps_hold(unsigned type);
++
+ static void
+ keys_reboot_fastboot(void)
+ {
+@@ -129,6 +131,7 @@ keys_reboot_fastboot(void)
+ 		*(volatile uint32_t *)(imem + 0x65cu) = 0x77665500u;
+ 	}
+ 	delay(200000);          /* the USB log gets the line out */
++	(void)sweet_pon_ps_hold(0x01);  /* warm: keeps the fastboot cookie; init set PS_HOLD to shutdown */
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	register uint64_t x0 __asm__("x0") = 0x84000009u;      /* PSCI SYSTEM_RESET */
+ 	__asm__ volatile("smc #0" : "+r"(x0) : : "x1", "x2", "x3", "memory");
+@@ -192,6 +195,28 @@ keys_thread(void *arg, wait_result_t result)
  	}
  }
  
@@ -35,12 +54,14 @@ index 75e6b77..73176e1 100644
 +	    keys_read(keys_pon_apid, 0x0842u, &type) && keys_read(keys_pon_apid, 0x0843u, &en);
 +	printf("RAIN KEYS: long power press = shut down: %s (s1 %#x s2 %#x type %#x en %#x, read %d)\n",
 +	    ok ? "set" : "FAILED", s1, s2, type, en, r);
++	/* PS_HOLD low (PSCI SYSTEM_OFF, ABL's "fastboot oem poweroff") = shutdown too; restart paths reset it */
++	(void)sweet_pon_ps_hold(0x04);
 +}
 +
  void
  sweet_keys_init(void)
  {
-@@ -244,6 +264,9 @@ sweet_keys_init(void)
+@@ -244,6 +269,9 @@ sweet_keys_init(void)
  	if (!pok && !gok) {
  		printf("SWEET KEYS: no readable keys; polling retained for recovery\n");
  	}
