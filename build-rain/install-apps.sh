@@ -61,6 +61,17 @@ for a in "$work"/*.app; do
 	echo "installed /Applications/$name ($exe, cryptid $c)"
 done
 
+# Apple's removable apps (Files, Notes, Calculator, Weather, ...): iOS 16 ships them in
+# /private/var/staged_system_apps and installs them during the first-boot data migration, which the
+# root tweaks skip. Copied (not moved) into /Applications, so they register as system apps.
+for a in "$mnt"/private/var/staged_system_apps/*.app; do
+	name=$(basename "$a")
+	if [ ! -e "$mnt/Applications/$name" ]; then
+		cp -a "$a" "$mnt/Applications/$name"
+		echo "installed Apple's /Applications/$name (from staged_system_apps)"
+	fi
+done
+
 # make lsd rebuild its database at the next boot
 n=0
 for db in "$mnt"/private/var/containers/Data/System/*/Library/Caches/com.apple.LaunchServices*.csstore; do
