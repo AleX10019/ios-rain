@@ -38,6 +38,14 @@ $CC -framework CoreFoundation -framework IOKit -o "$O/metal_props" "$MT/metal_pr
 $CC -o "$O/metal_boot" "$MT/metal_boot.c"
 cp "$M/libredwoodair.dylib" "$O/"
 cp "$M/libOSMesa.8.dylib" "$O/"
+# Rain Dodge (../apps/dodge): the first sideloaded app, an original UIKit game, as /Applications/RainDodge.app
+A="$O/RainDodge.app"
+rm -rf "$A" && mkdir -p "$A"
+$CC -fno-objc-arc -framework UIKit -framework Foundation -framework QuartzCore -framework CoreGraphics \
+	-o "$A/RainDodge" "$G/../apps/dodge/main.m"
+cp "$G/../apps/dodge/Info.plist" "$A/Info.plist"
+python3 "$G/../apps/dodge/mkicon.py" "$A/AppIcon60x60@2x.png"
+codesign -f -s - "$A"
 # Ad-hoc signatures: the kernel's AMFI stand-in makes every *signed* binary on the root a platform
 # binary, and launchd panics when a system job execs one that is not ("unexpected exec of non-platform binary").
 codesign -f -s - "$O/backboardd" "$O/RedwoodAudio" "$O/hfs-grow" "$O/RedwoodMetal" "$O/metal_drv_test" "$O/metal_props" "$O/metal_boot" "$O"/*.dylib
