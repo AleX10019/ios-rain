@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sun, 15 Nov 2026 02:10:00 +0100
+Subject: [PATCH] rain-1024: tell the PMIC what PS_HOLD low means (real power-off)
+
+Power off came back as a reboot even unplugged: the bootloader leaves
+PON PS_HOLD_RESET_CTL at warm reset, and PSCI SYSTEM_OFF only drops
+PS_HOLD. Warm reboots also keep the Wi-Fi chip powered in a state its
+firmware rejects (wlfw cap err 119 on every boot after the first).
+haltRestart now sets the reset type first through the PON owner channel
+(as Linux qpnp_pon_system_pwr_off): shutdown for power off, hard reset
+(rails cycled) for restart.
+---
+diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
+index 080552c..0df049a 100644
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -249,4 +249,25 @@ sweet_keys_init(void)
+ 		printf("SWEET KEYS: kernel_thread_start failed %d\n", kr);
+ 	}
+ }
++/*
++ * rain: what the PMIC does when PS_HOLD drops (PON PS_HOLD_RESET_CTL 0x85a, enable in CTL2 0x85b bit 7;
++ * Linux qpnp_pon_system_pwr_off, PM6125 gen2 PON). The bootloader leaves it at warm reset, so PSCI
++ * SYSTEM_OFF came back as a reboot, and warm reboots keep the Wi-Fi chip powered in a state its
++ * firmware rejects (wlfw cap err 119). type: 0x04 shutdown, 0x07 hard reset (rails cycled), 0x01 warm.
++ * Called from SweetPlatformExpert::haltRestart just before PSCI. Returns 0 when all three writes landed.
++ */
++int sweet_pon_ps_hold(unsigned type);
++int
++sweet_pon_ps_hold(unsigned type)
++{
++	uint8_t check = 0;
++	bool ok = keys_write(keys_pon_apid, 0x085bu, 0x00);     /* disable before changing the type */
++	delay(100);                                             /* >= 3 sleep-clock cycles */
++	ok = ok && keys_write(keys_pon_apid, 0x085au, (uint8_t)type);
++	ok = ok && keys_write(keys_pon_apid, 0x085bu, 0x80);
++	bool r = keys_read(keys_pon_apid, 0x085au, &check);
++	printf("RAIN PON: PS_HOLD reset type %#x: %s (reads back %#x, %d)\n", type, ok ? "set" : "FAILED", check, r);
++	return ok ? 0 : -1;
++}
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index 397f1f5..b734d2b 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -25,6 +25,7 @@ public:
+ 
+ extern "C" int sweet_spmi_init(void);
+ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern "C" int sweet_pon_ps_hold(unsigned type);
+ extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
+ 
+ /*
+@@ -90,6 +91,8 @@ SweetPlatformExpert::haltRestart(unsigned int type)
+ 	} else {
+ 		return IODTPlatformExpert::haltRestart(type);
+ 	}
++	/* rain: the PMIC must be told first, or PS_HOLD low is a warm reset either way */
++	sweet_pon_ps_hold(fn == 0x84000008u ? 0x04 : 0x07);
+ 	IOLog("RAIN: %s via PSCI\n", fn == 0x84000008u ? "power off" : "restart");
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	register uint64_t x0 __asm__("x0") = fn;
