@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sun, 15 Nov 2026 03:50:00 +0100
+Subject: [PATCH] rain-1026: a long power-key press shuts the phone down
+
+The bootloader leaves the PMIC's KPDPWR S2 reset as a reset, so holding
+power rebooted straight back into iOS, and the slider's power-off hangs
+before the kernel's halt path. Set the S2 reset type to shutdown at key
+init so holding power powers the phone off in hardware, no software or
+PC needed.
+---
+diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
+index 75e6b77..73176e1 100644
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -192,6 +192,26 @@ keys_thread(void *arg, wait_result_t result)
+ 	}
+ }
+ 
++/*
++ * rain: holding the power key must switch the phone off without any software. The PMIC's KPDPWR
++ * S2 reset (PON 0x840 S1 timer, 0x841 S2 timer, 0x842 type, 0x843 bit 7 enable; Linux
++ * qpnp_config_reset) is left by the bootloader as a reset, so a long press rebooted into iOS again.
++ * Make it a shutdown (type 0x04). The slider's power-off hangs before the kernel's halt path.
++ */
++static void
++keys_power_key_shutdown(void)
++{
++	uint8_t s1 = 0, s2 = 0, type = 0, en = 0;
++	bool ok = keys_write(keys_pon_apid, 0x0843u, 0x00);     /* disable before changing the type */
++	delay(100);                                             /* >= 3 sleep-clock cycles */
++	ok = ok && keys_write(keys_pon_apid, 0x0842u, 0x04);
++	ok = ok && keys_write(keys_pon_apid, 0x0843u, 0x80);
++	bool r = keys_read(keys_pon_apid, 0x0840u, &s1) && keys_read(keys_pon_apid, 0x0841u, &s2) &&
++	    keys_read(keys_pon_apid, 0x0842u, &type) && keys_read(keys_pon_apid, 0x0843u, &en);
++	printf("RAIN KEYS: long power press = shut down: %s (s1 %#x s2 %#x type %#x en %#x, read %d)\n",
++	    ok ? "set" : "FAILED", s1, s2, type, en, r);
++}
++
+ void
+ sweet_keys_init(void)
+ {
+@@ -244,6 +264,9 @@ sweet_keys_init(void)
+ 	if (!pok && !gok) {
+ 		printf("SWEET KEYS: no readable keys; polling retained for recovery\n");
+ 	}
++	if (pok) {
++		keys_power_key_shutdown();
++	}
+ 	kern_return_t kr = kernel_thread_start(keys_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+-- 
+2.40.0
