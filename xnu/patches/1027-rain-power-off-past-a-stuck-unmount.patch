@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: taynotfound <marztayron@gmail.com>
+Date: Sun, 15 Nov 2026 04:30:00 +0100
+Subject: [PATCH] rain-1027: power off past a stuck root unmount
+
+The R2 log of a "slide to power off": launchd calls reboot(RB_HALT),
+the kernel syncs and the log ends at "hfs: unmount initiated on
+iOSRoot"; PEHaltRestart is never reached and the screen stays on. Arm a
+15 s thread call at the root-unmount stage that halts or restarts
+anyway (the disks are synced, the HFS journal replays).
+---
+diff --git a/bsd/kern/kern_shutdown.c b/bsd/kern/kern_shutdown.c
+index 20d9d47..51edce0 100644
+--- a/bsd/kern/kern_shutdown.c
++++ b/bsd/kern/kern_shutdown.c
+@@ -66,6 +66,7 @@
+ #include <sys/sysproto.h>               /* abused for sync() */
+ #include <kern/clock.h>                 /* for delay_for_interval() */
+ #include <libkern/OSAtomic.h>
++#include <kern/thread_call.h>
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IOMessage.h>
+ 
+@@ -173,6 +174,21 @@ extern int vm_swapfile_create_thread_running;
+ extern int vm_swapfile_gc_thread_running;
+ extern uint32_t cl_sparse_push_error;
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * rain: "slide to power off" hung for good at the root's hfs unmount, before PEHaltRestart. The disks
++ * were synced already and the HFS journal replays at the next mount, so give the unmount 15 s and
++ * then halt or restart anyway.
++ */
++static void
++rain_shutdown_stalled(thread_call_param_t howto, __unused thread_call_param_t unused)
++{
++	bool halt = ((int)(uintptr_t)howto & RB_HALT) != 0;
++	printf("RAIN: shutdown stuck 15 s in unmount, forcing %s\n", halt ? "power off" : "restart");
++	PEHaltRestart(halt ? kPEHaltCPU : kPERestartCPU);
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
++
+ int
+ reboot_kernel(int howto, char *message)
+ {
+@@ -255,6 +271,14 @@ reboot_kernel(int howto, char *message)
+ 		}
+ 
+ 		IOSystemShutdownNotification(howto, kIOSystemShutdownNotificationStageRootUnmount);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		{
++			uint64_t at;
++			clock_interval_to_deadline(15, NSEC_PER_SEC, &at);
++			thread_call_enter_delayed(thread_call_allocate(rain_shutdown_stalled,
++			    (thread_call_param_t)(uintptr_t)howto), at);
++		}
++#endif
+ 
+ 		if (cl_sparse_push_error) {
+ 			panic("system_shutdown cluster_push_err failed with ENOSPC %d times\n", cl_sparse_push_error);
+-- 
+2.40.0
