@@ -14,7 +14,7 @@ diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
 index 4390193..9f18c42 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
-@@ -1540,6 +1540,299 @@ rain_touch_run(unsigned stop)
+@@ -1540,6 +1540,309 @@ rain_touch_run(unsigned stop)
  	}
  }
  
@@ -42,21 +42,31 @@ index 4390193..9f18c42 100644
 +} fts;
 +
 +static int
-+rain_fts_spi_write(const uint8_t *cmd, unsigned len)
++rain_fts_rom_write(const uint8_t *cmd, unsigned len)
 +{
-+	static uint8_t tx[RM_TXMAX];
-+	if (len == 0 || FTS_SPI_HDR_LEN + len > sizeof(tx)) {
++	static uint8_t tx[RM_TXMAX], rx[RM_RXMAX];
++	if (len == 0 || len > sizeof(tx)) {
 +		return -60;
 +	}
-+	tx[0] = cmd[0];
-+	tx[1] = 0x00u;                  /* WRITE_CMD */
-+	tx[2] = (uint8_t)(len >> 8);
-+	tx[3] = (uint8_t)(len & 0xffu);
-+	tx[4] = 0x00u;
-+	tx[5] = 0x00u;
-+	tx[6] = 0x00u;
-+	memcpy(tx + FTS_SPI_HDR_LEN, cmd, len);
-+	return rain_spi(RAIN_OP_TX, tx, NULL, FTS_SPI_HDR_LEN + len);
++	memcpy(tx, cmd, len);
++	return rain_spi(RAIN_OP_FULL, tx, rx, len);
++}
++
++static int
++rain_fts_rom_read(const uint8_t *cmd, unsigned cmdlen, uint8_t *out, unsigned datalen)
++{
++	static uint8_t tx[RM_RXMAX], rx[RM_RXMAX];
++	unsigned total = cmdlen + datalen;
++	if (cmdlen == 0 || datalen == 0 || total > sizeof(tx)) {
++		return -61;
++	}
++	bzero(tx, total);
++	memcpy(tx, cmd, cmdlen);
++	int e = rain_spi(RAIN_OP_FULL, tx, rx, total);
++	if (!e) {
++		memcpy(out, rx + cmdlen, datalen);
++	}
++	return e;
 +}
 +
 +static int
@@ -66,12 +76,6 @@ index 4390193..9f18c42 100644
 +	unsigned total = FTS_SPI_HDR_LEN + datalen;
 +	if (cmdlen == 0 || datalen == 0 || total > sizeof(tx)) {
 +		return -61;
-+	}
-+	if (cmdlen > 1u) {
-+		int e = rain_fts_spi_write(cmd, cmdlen);
-+		if (e) {
-+			return e;
-+		}
 +	}
 +	bzero(tx, total);
 +	tx[0] = cmd[0];
@@ -112,10 +116,10 @@ index 4390193..9f18c42 100644
 +		touch_wait(15);
 +		touch_gpio(TOUCH_PIN_RESET, 0, 0, 2, true, true);
 +		touch_wait(2u + retry * 2u);
-+		int ew = rain_fts_spi_write(start_cmd, 2);
++		int ew = rain_fts_rom_write(start_cmd, 2);
 +		if (ew == 0) {
 +			touch_wait(10);
-+			int er = rain_fts_spi_read(id_cmd, 4, fts.boot_id, 2);
++			int er = rain_fts_rom_read(id_cmd, 4, fts.boot_id, 2);
 +			rn.id[0] = fts.boot_id[0];
 +			rn.id[1] = fts.boot_id[1];
 +			rn.id[2] = (uint8_t)(-er);
@@ -165,7 +169,7 @@ index 4390193..9f18c42 100644
 +			for (uint32_t i = 0; i < chunk; i++) {
 +				pkt[6u + i] = fw[off + i];
 +			}
-+			e = rain_fts_spi_write(pkt, 6u + chunk);
++			e = rain_fts_rom_write(pkt, 6u + chunk);
 +			off += chunk;
 +			fts.wrote += chunk;
 +		}
@@ -176,14 +180,14 @@ index 4390193..9f18c42 100644
 +			FTS_ROM_CMD_ECC, 0x00, 0x00, 0x00,
 +			(uint8_t)(app_len >> 16), (uint8_t)(app_len >> 8), (uint8_t)(app_len & 0xffu)
 +		};
-+		if (rain_fts_spi_write(ecc_cmd, 7)) {
++		if (rain_fts_rom_write(ecc_cmd, 7)) {
 +			continue;
 +		}
 +		uint8_t fin_cmd = FTS_ROM_CMD_ECC_FIN, fin_val = 0xffu;
 +		bool ecc_done = false;
 +		for (unsigned i = 0; i < 100u; i++) {
 +			touch_wait(1);
-+			if (rain_fts_spi_read(&fin_cmd, 1, &fin_val, 1) == 0 &&
++			if (rain_fts_rom_read(&fin_cmd, 1, &fin_val, 1) == 0 &&
 +			    (fin_val == 0xa5u || fin_val == 0x00u)) {
 +				ecc_done = true;
 +				break;
@@ -193,7 +197,7 @@ index 4390193..9f18c42 100644
 +			continue;
 +		}
 +		uint8_t rd_ecc_cmd = FTS_ROM_CMD_ECC_RD, tp_ecc_buf[2] = { 0 };
-+		if (rain_fts_spi_read(&rd_ecc_cmd, 1, tp_ecc_buf, 2)) {
++		if (rain_fts_rom_read(&rd_ecc_cmd, 1, tp_ecc_buf, 2)) {
 +			continue;
 +		}
 +		uint16_t tp_ecc = (uint16_t)(((uint16_t)tp_ecc_buf[0] << 8) | tp_ecc_buf[1]);
@@ -202,7 +206,7 @@ index 4390193..9f18c42 100644
 +			continue;
 +		}
 +		uint8_t start_app = FTS_ROM_CMD_START;
-+		if (rain_fts_spi_write(&start_app, 1)) {
++		if (rain_fts_rom_write(&start_app, 1)) {
 +			continue;
 +		}
 +		touch_wait(50);
