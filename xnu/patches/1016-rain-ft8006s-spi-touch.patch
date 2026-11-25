@@ -1,0 +1,338 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Custom Port <rain-ft8006s@local>
+Date: Wed, 25 Nov 2026 13:30:00 +0700
+Subject: [PATCH] rain-1016: FocalTech FT8006S SPI touch + PRAM download for Xinli panel
+
+Support Redmi 10C (fog/rain) units fitted with the Xinli 720x1650 panel
+using FocalTech FT8006S over QUP0 SE0 SPI (spi@4a80000, GPIO 86 reset,
+GPIO 80 IRQ). Probes ROM boot ID 0x8632, downloads the PRAM app from
+TouchFW (/vendor/firmware/focaltech_ts_fw_xinli.bin), verifies TP CRC16,
+starts PRAM (chip ID 0xA0), reloads on display wake, and feeds 10-point
+touches through the sweetfb_fit=3 canvas transform.
+---
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index 4390193..9f18c42 100644
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -1606,6 +1606,289 @@ rain_touch_run(unsigned stop)
+ 	}
+ }
+ 
++/* ---- 1016: FocalTech FT8006S SPI touch (Xinli 720x1650 panel on QUP0 SE0) ---- */
++#define FTS_SPI_HDR_LEN      7u
++#define FTS_CMD_START1       0x55u
++#define FTS_CMD_START2       0xAAu
++#define FTS_CMD_READ_ID      0x90u
++#define FTS_ROM_CMD_WRITE    0xAEu
++#define FTS_ROM_CMD_START    0x08u
++#define FTS_ROM_CMD_ECC      0xCCu
++#define FTS_ROM_CMD_ECC_FIN  0xCEu
++#define FTS_ROM_CMD_ECC_RD   0xCDu
++#define FTS_REG_CHIP_ID      0xA3u
++#define FTS_REG_TOUCH_DATA   0x01u
++#define FTS_APP_INFO_OFF     0x100u
++#define FTS_PRAM_CHUNK       4080u      /* 7 + 6 + 4080 = 4093 <= RM_TXMAX (4352) */
++#define FTS_AL2_FCS_COEF     ((1u << 15) | (1u << 10) | (1u << 3))
++
++static struct {
++	bool active;
++	const volatile uint8_t *fw;
++	uint32_t fwlen, applen, wrote, reloads, reload_fail;
++	uint8_t boot_id[2], chip_id;
++} fts;
++
++static int
++rain_fts_spi_write(const uint8_t *cmd, unsigned len)
++{
++	static uint8_t tx[RM_TXMAX];
++	if (len == 0 || FTS_SPI_HDR_LEN + len > sizeof(tx)) {
++		return -60;
++	}
++	tx[0] = cmd[0];
++	tx[1] = 0x00u;                  /* WRITE_CMD */
++	tx[2] = (uint8_t)(len >> 8);
++	tx[3] = (uint8_t)(len & 0xffu);
++	tx[4] = 0x00u;
++	tx[5] = 0x00u;
++	tx[6] = 0x00u;
++	memcpy(tx + FTS_SPI_HDR_LEN, cmd, len);
++	return rain_spi(RAIN_OP_TX, tx, NULL, FTS_SPI_HDR_LEN + len);
++}
++
++static int
++rain_fts_spi_read(const uint8_t *cmd, unsigned cmdlen, uint8_t *out, unsigned datalen)
++{
++	static uint8_t tx[RM_RXMAX], rx[RM_RXMAX];
++	unsigned total = FTS_SPI_HDR_LEN + datalen;
++	if (cmdlen == 0 || datalen == 0 || total > sizeof(tx)) {
++		return -61;
++	}
++	if (cmdlen > 1u) {
++		int e = rain_fts_spi_write(cmd, cmdlen);
++		if (e) {
++			return e;
++		}
++	}
++	bzero(tx, total);
++	tx[0] = cmd[0];
++	tx[1] = 0x80u;                  /* READ_CMD */
++	tx[2] = (uint8_t)(datalen >> 8);
++	tx[3] = (uint8_t)(datalen & 0xffu);
++	int e = rain_spi(RAIN_OP_FULL, tx, rx, total);
++	if (!e) {
++		memcpy(out, rx + FTS_SPI_HDR_LEN, datalen);
++	}
++	return e;
++}
++
++static uint16_t
++rain_fts_crc16(const volatile uint8_t *p, uint32_t len)
++{
++	uint16_t ecc = 0;
++	for (uint32_t i = 0; i + 1u < len; i += 2u) {
++		ecc ^= (uint16_t)(((uint16_t)p[i] << 8) | p[i + 1u]);
++		for (unsigned j = 0; j < 16u; j++) {
++			if (ecc & 1u) {
++				ecc = (uint16_t)((ecc >> 1) ^ FTS_AL2_FCS_COEF);
++			} else {
++				ecc >>= 1;
++			}
++		}
++	}
++	return ecc;
++}
++
++static bool
++rain_fts_enter_boot(void)
++{
++	static const uint8_t start_cmd[2] = { FTS_CMD_START1, FTS_CMD_START2 };
++	static const uint8_t id_cmd[4] = { FTS_CMD_READ_ID, 0x00, 0x00, 0x00 };
++	for (unsigned retry = 0; retry < 5u; retry++) {
++		if (rain_fts_spi_write(start_cmd, 2) == 0) {
++			touch_wait(12);
++			if (rain_fts_spi_read(id_cmd, 4, fts.boot_id, 2) == 0 &&
++			    fts.boot_id[0] == 0x86u && fts.boot_id[1] == 0x32u) {
++				return true;
++			}
++		}
++		touch_wait(10);
++	}
++	return false;
++}
++
++static int
++rain_fts_download(const volatile uint8_t *fw, uint32_t fwlen)
++{
++	static uint8_t pkt[6u + FTS_PRAM_CHUNK];
++	if (fwlen < 0x200u) {
++		return -62;
++	}
++	uint32_t app_len = ((uint32_t)fw[FTS_APP_INFO_OFF] << 8) | fw[FTS_APP_INFO_OFF + 1u];
++	uint32_t app_len_inv = ((uint32_t)fw[FTS_APP_INFO_OFF + 2u] << 8) | fw[FTS_APP_INFO_OFF + 3u];
++	if (app_len == 0 || app_len > fwlen || ((app_len + app_len_inv) & 0xffffu) != 0xffffu) {
++		app_len = fwlen > 0x10000u ? 0x10000u : fwlen;
++	}
++	fts.applen = app_len;
++	uint16_t host_ecc = rain_fts_crc16(fw, app_len);
++
++	for (unsigned tries = 0; tries < 3u; tries++) {
++		fts.wrote = 0;
++		if (!rain_fts_enter_boot()) {
++			continue;
++		}
++		int e = 0;
++		uint32_t off = 0;
++		while (off < app_len && !e) {
++			uint32_t chunk = app_len - off;
++			if (chunk > FTS_PRAM_CHUNK) {
++				chunk = FTS_PRAM_CHUNK;
++			}
++			pkt[0] = FTS_ROM_CMD_WRITE;
++			pkt[1] = (uint8_t)(off >> 16);
++			pkt[2] = (uint8_t)(off >> 8);
++			pkt[3] = (uint8_t)(off & 0xffu);
++			pkt[4] = (uint8_t)(chunk >> 8);
++			pkt[5] = (uint8_t)(chunk & 0xffu);
++			for (uint32_t i = 0; i < chunk; i++) {
++				pkt[6u + i] = fw[off + i];
++			}
++			e = rain_fts_spi_write(pkt, 6u + chunk);
++			off += chunk;
++			fts.wrote += chunk;
++		}
++		if (e) {
++			continue;
++		}
++		uint8_t ecc_cmd[7] = {
++			FTS_ROM_CMD_ECC, 0x00, 0x00, 0x00,
++			(uint8_t)(app_len >> 16), (uint8_t)(app_len >> 8), (uint8_t)(app_len & 0xffu)
++		};
++		if (rain_fts_spi_write(ecc_cmd, 7)) {
++			continue;
++		}
++		uint8_t fin_cmd = FTS_ROM_CMD_ECC_FIN, fin_val = 0xffu;
++		bool ecc_done = false;
++		for (unsigned i = 0; i < 100u; i++) {
++			touch_wait(1);
++			if (rain_fts_spi_read(&fin_cmd, 1, &fin_val, 1) == 0 &&
++			    (fin_val == 0xa5u || fin_val == 0x00u)) {
++				ecc_done = true;
++				break;
++			}
++		}
++		if (!ecc_done) {
++			continue;
++		}
++		uint8_t rd_ecc_cmd = FTS_ROM_CMD_ECC_RD, tp_ecc_buf[2] = { 0 };
++		if (rain_fts_spi_read(&rd_ecc_cmd, 1, tp_ecc_buf, 2)) {
++			continue;
++		}
++		uint16_t tp_ecc = (uint16_t)(((uint16_t)tp_ecc_buf[0] << 8) | tp_ecc_buf[1]);
++		if (tp_ecc != host_ecc) {
++			printf("RAIN FTS: ECC mismatch tp=%#x host=%#x\n", tp_ecc, host_ecc);
++			continue;
++		}
++		uint8_t start_app = FTS_ROM_CMD_START;
++		if (rain_fts_spi_write(&start_app, 1)) {
++			continue;
++		}
++		touch_wait(50);
++		uint8_t id_reg = FTS_REG_CHIP_ID, cid = 0;
++		if (rain_fts_spi_read(&id_reg, 1, &cid, 1) == 0 && cid == 0xa0u) {
++			fts.chip_id = cid;
++			return 0;
++		}
++	}
++	return -63;
++}
++
++static bool
++rain_fts_probe_and_bringup(void)
++{
++	if (!rain_fts_enter_boot()) {
++		return false;
++	}
++	printf("RAIN FTS: detected FT8006S ROM ID %02x%02x\n", fts.boot_id[0], fts.boot_id[1]);
++	DTEntry mm;
++	void const *prop = NULL;
++	unsigned int psize = 0;
++	rn.stage = "fts fw find";
++	if (SecureDTLookupEntry(NULL, "/chosen/memory-map", &mm) != kSuccess ||
++	    SecureDTGetProperty(mm, "TouchFW", &prop, &psize) != kSuccess || psize < 16) {
++		rn.err = -64;
++		return true;
++	}
++	uint64_t fwpa = ((const uint64_t *)prop)[0];
++	fts.fwlen = (uint32_t)((const uint64_t *)prop)[1];
++	flush_dcache64((addr64_t)fwpa, fts.fwlen, TRUE);
++	vm_offset_t fw = ml_io_map((vm_offset_t)fwpa, (vm_size_t)fts.fwlen);
++	if (!fw) {
++		rn.err = -65;
++		return true;
++	}
++	fts.fw = (const volatile uint8_t *)fw;
++	rn.stage = "fts fw download";
++	int e = rain_fts_download(fts.fw, fts.fwlen);
++	if (e) {
++		rn.err = e;
++		return true;
++	}
++	fts.active = true;
++	rn.err = 0;
++	return true;
++}
++
++static void
++rain_fts_run(unsigned stop)
++{
++	uint8_t td_reg = FTS_REG_TOUCH_DATA;
++	uint8_t buf[64];
++	unsigned errs = 0;
++	rn.stage = "fts run";
++	printf("RAIN FTS: FT8006S active (chip %#x, app %u bytes), polling every 10 ms\n",
++	    fts.chip_id, fts.applen);
++	for (;;) {
++		int x[TOUCH_MAX] = { 0 }, y[TOUCH_MAX] = { 0 };
++		uint32_t mask = 0;
++		if (rain_panel_off) {
++			touch_report(0, st.x, st.y);
++			touch_wait(50);
++			continue;
++		}
++		if (rain_panel_woke) {
++			rain_panel_woke = 0;
++			touch_wait(150);
++			int e = rain_fts_download(fts.fw, fts.fwlen);
++			fts.reloads++;
++			fts.reload_fail += (e != 0);
++			printf("RAIN FTS: wake reload %u err=%d\n", fts.reloads, e);
++		}
++		if (rain_fts_spi_read(&td_reg, 1, buf, 62)) {
++			if (++errs == 10u) {
++				touch_report(0, st.x, st.y);
++			}
++			touch_wait(10);
++			continue;
++		}
++		errs = 0;
++		uint8_t npts = buf[1] & 0x0fu;
++		if (buf[1] != 0xffu && npts <= TOUCH_MAX) {
++			for (unsigned i = 0; i < TOUCH_MAX; i++) {
++				const uint8_t *f = buf + 2u + 6u * i;
++				unsigned ev = (f[0] >> 6) & 3u;
++				unsigned id = (f[2] >> 4) & 0x0fu;
++				unsigned px = (((unsigned)f[0] & 0x0fu) << 8) | f[1];
++				unsigned py = (((unsigned)f[2] & 0x0fu) << 8) | f[3];
++				if (id >= TOUCH_MAX || (ev != 0u && ev != 2u) || px > 719u || py > 1649u) {
++					continue;
++				}
++				int hx = (int)(px * 1125u / 720u) - 20;
++				int hy = (py < 45u ? 0 : (int)((py - 45u) * 2436u / 1559u)) - 18;
++				x[id] = hx < 0 ? 0 : (hx > 1079 ? 1079 : hx);
++				y[id] = hy < 0 ? 0 : (hy > 2399 ? 2399 : hy);
++				mask |= 1u << id;
++			}
++		}
++		if (stop == 2u && mask) {
++			rain_touch_report();
++		}
++		touch_report(mask, x, y);
++		touch_wait(10);
++	}
++}
++
+ static void
+ rain_touch_probe(void)
+ {
+@@ -1675,6 +1958,12 @@ rain_touch_probe(void)
+ 		return;
+ 	}
+ 	rn.stage = "trim id";
++	if (rain_fts_probe_and_bringup()) {
++		if (!rn.err) {
++			rn.stage = "done";
++		}
++		return;
++	}
+ 	int e1 = rain_nvt_read(RAIN_NVT_TRIM, rn.id, 6);
+ 	int e2 = rain_nvt_read(RAIN_NVT_TRIM_OLD, rn.id_old, 6);
+ 	rn.err = e1 ? e1 : e2;
+@@ -1798,10 +2087,17 @@ touch_thread(void *arg, wait_result_t result)
+ 		uint32_t stop = 0;
+ 		(void)PE_parse_boot_argn("raintouchpanic", &stop, sizeof(stop));
+ 		rain_touch_probe();
++		if (fts.active) {
++			nf.wrote = fts.wrote;
++		}
+ 		if (rn.err || !nf.wrote || stop == 1) {
+ 			rain_touch_report();    /* panics with every reading */
+ 		}
+-		rain_touch_run(stop);
++		if (fts.active) {
++			rain_fts_run(stop);
++		} else {
++			rain_touch_run(stop);
++		}
+ 		goto out;
+ 	}
+ 	st.stage = "map";
