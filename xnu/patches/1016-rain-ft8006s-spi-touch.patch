@@ -14,7 +14,7 @@ diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
 index 4390193..9f18c42 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
-@@ -1540,6 +1540,293 @@ rain_touch_run(unsigned stop)
+@@ -1540,6 +1540,299 @@ rain_touch_run(unsigned stop)
  	}
  }
  
@@ -106,20 +106,25 @@ index 4390193..9f18c42 100644
 +rain_fts_enter_boot(void)
 +{
 +	static const uint8_t start_cmd[2] = { FTS_CMD_START1, FTS_CMD_START2 };
-+	touch_gpio(TOUCH_PIN_RESET, 0, 0, 2, true, false);
-+	touch_wait(15);
-+	touch_gpio(TOUCH_PIN_RESET, 0, 0, 2, true, true);
-+	touch_wait(15);
 +	static const uint8_t id_cmd[4] = { FTS_CMD_READ_ID, 0x00, 0x00, 0x00 };
-+	for (unsigned retry = 0; retry < 5u; retry++) {
-+		if (rain_fts_spi_write(start_cmd, 2) == 0) {
-+			touch_wait(12);
-+			if (rain_fts_spi_read(id_cmd, 4, fts.boot_id, 2) == 0 &&
-+			    fts.boot_id[0] == 0x86u && fts.boot_id[1] == 0x32u) {
++	for (unsigned retry = 0; retry < 6u; retry++) {
++		touch_gpio(TOUCH_PIN_RESET, 0, 0, 2, true, false);
++		touch_wait(15);
++		touch_gpio(TOUCH_PIN_RESET, 0, 0, 2, true, true);
++		touch_wait(2u + retry * 2u);
++		int ew = rain_fts_spi_write(start_cmd, 2);
++		if (ew == 0) {
++			touch_wait(10);
++			int er = rain_fts_spi_read(id_cmd, 4, fts.boot_id, 2);
++			rn.id[0] = fts.boot_id[0];
++			rn.id[1] = fts.boot_id[1];
++			rn.id[2] = (uint8_t)(-er);
++			if (er == 0 && fts.boot_id[0] == 0x86u && fts.boot_id[1] == 0x32u) {
 +				return true;
 +			}
++		} else {
++			rn.id[3] = (uint8_t)(-ew);
 +		}
-+		touch_wait(10);
 +	}
 +	return false;
 +}
